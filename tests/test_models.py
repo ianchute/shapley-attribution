@@ -1,5 +1,8 @@
 """Tests for attribution models."""
 
+import os
+import tempfile
+
 import numpy as np
 import pytest
 
@@ -12,7 +15,10 @@ from shapley_attribution import (
     LinearAttribution,
     TimeDecayAttribution,
     PositionBasedAttribution,
+    save_onnx,
+    load_onnx,
 )
+from shapley_attribution.base import BaseAttributionModel
 from shapley_attribution.datasets import make_attribution_problem
 
 
@@ -404,3 +410,229 @@ class TestPathShapley:
             f"PathShapley NMAE {path_nmae:.4f} should beat Linear {linear_nmae:.4f} "
             "on directed data evaluated against ordered ground truth"
         )
+
+
+# ---------------------------------------------------------------
+# ONNX serialization
+# ---------------------------------------------------------------
+
+# All models that should survive an ONNX round-trip
+ONNX_MODELS = [
+    SimplifiedShapleyAttribution,
+    MonteCarloShapleyAttribution,
+    PathShapleyAttribution,
+    FirstTouchAttribution,
+    LastTouchAttribution,
+    LinearAttribution,
+    TimeDecayAttribution,
+    PositionBasedAttribution,
+]
+
+onnx = pytest.importorskip("onnx", reason="onnx not installed")
+
+
+class TestONNX:
+    """ONNX save/load round-trip tests for all attribution models."""
+
+    @pytest.fixture
+    def onnx_journeys(self):
+        return [[1, 2, 3], [1, 2], [2, 3], [1], [3, 1, 2]]
+
+    @pytest.fixture
+    def onnx_conversions(self):
+        return np.array([1, 1, 0, 1, 0])
+
+    @pytest.fixture
+    def onnx_path(self):
+        """Yield a temporary .onnx file path and clean up after the test."""
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
+            path = f.name
+        yield path
+        if os.path.exists(path):
+            os.unlink(path)
+
+    # ------------------------------------------------------------------
+    # Round-trip: attribution scores must survive save → load
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_attribution_array_round_trip(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """save_onnx → load_onnx preserves get_attribution_array()."""
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+
+        np.testing.assert_allclose(
+            model.get_attribution_array(),
+            loaded.get_attribution_array(),
+            atol=1e-5,
+            err_msg=f"{ModelClass.__name__}: attribution array mismatch after ONNX round-trip",
+        )
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_channels_round_trip(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """channels_ must be identical after round-trip."""
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+
+        np.testing.assert_array_equal(
+            model.channels_,
+            loaded.channels_,
+            err_msg=f"{ModelClass.__name__}: channels_ mismatch after ONNX round-trip",
+        )
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_is_fitted_after_load(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """Loaded model must be marked as fitted."""
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+        assert loaded.is_fitted_
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_get_attribution_usable_after_load(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """get_attribution() returns a dict with the correct keys."""
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+
+        attr = loaded.get_attribution()
+        assert isinstance(attr, dict)
+        assert set(attr.keys()) == set(model.get_attribution().keys())
+
+    # ------------------------------------------------------------------
+    # Instance method API (save_onnx / load_onnx on the model)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_instance_method_api(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """model.save_onnx() / BaseAttributionModel.load_onnx() API works."""
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        model.save_onnx(onnx_path)
+        loaded = BaseAttributionModel.load_onnx(onnx_path)
+
+        np.testing.assert_allclose(
+            model.get_attribution_array(),
+            loaded.get_attribution_array(),
+            atol=1e-5,
+        )
+
+    # ------------------------------------------------------------------
+    # String channels
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_string_channels_round_trip(self, ModelClass, onnx_path):
+        """String channel identifiers are preserved through ONNX."""
+        journeys = [["email", "social"], ["social", "search"], ["email"]]
+        y = [1, 0, 1]
+        model = ModelClass().fit(journeys, y=y)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+
+        assert set(loaded.channels_) == set(model.channels_)
+        np.testing.assert_allclose(
+            model.get_attribution_array(),
+            loaded.get_attribution_array(),
+            atol=1e-5,
+        )
+
+    # ------------------------------------------------------------------
+    # GBM models: onnxruntime direct inference
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("ModelClass", [MonteCarloShapleyAttribution, PathShapleyAttribution])
+    def test_onnxruntime_inference(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """For GBM-backed models, the ONNX file can be run via onnxruntime."""
+        ort = pytest.importorskip("onnxruntime", reason="onnxruntime not installed")
+
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+
+        sess = ort.InferenceSession(onnx_path)
+        n_channels = len(model.channels_)
+        mask = np.ones((1, n_channels), dtype=np.float32)
+        outputs = sess.run(None, {"input": mask})
+
+        # Binary classifier: second output is probability array (n, 2)
+        proba = outputs[1]
+        assert proba.shape == (1, 2), f"Expected (1, 2) proba, got {proba.shape}"
+        assert 0.0 <= proba[0, 1] <= 1.0, "P(conversion) must be in [0, 1]"
+
+    @pytest.mark.parametrize("ModelClass", [MonteCarloShapleyAttribution, PathShapleyAttribution])
+    def test_loaded_model_transform_works(
+        self, ModelClass, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """transform() on the loaded GBM model uses the ORT wrapper correctly."""
+        model = ModelClass().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+
+        result = loaded.transform(onnx_journeys)
+        assert result.shape == (len(onnx_journeys), len(model.channels_))
+        assert np.all(result >= 0)
+
+    # ------------------------------------------------------------------
+    # position_attribution_ preserved (PathShapley)
+    # ------------------------------------------------------------------
+
+    def test_position_attribution_round_trip(
+        self, onnx_journeys, onnx_conversions, onnx_path
+    ):
+        """PathShapley position_attribution_ is preserved through ONNX."""
+        model = PathShapleyAttribution().fit(onnx_journeys, y=onnx_conversions)
+        save_onnx(model, onnx_path)
+        loaded = load_onnx(onnx_path)
+
+        assert hasattr(loaded, "position_attribution_")
+        assert set(loaded.position_attribution_.keys()) == set(
+            model.position_attribution_.keys()
+        )
+        for ch in model.channels_:
+            np.testing.assert_allclose(
+                model.position_attribution_[ch],
+                loaded.position_attribution_[ch],
+                atol=1e-5,
+                err_msg=f"position_attribution_[{ch}] mismatch after ONNX round-trip",
+            )
+
+    # ------------------------------------------------------------------
+    # Error handling
+    # ------------------------------------------------------------------
+
+    def test_load_invalid_onnx_raises(self, onnx_path):
+        """Loading an ONNX file without sa_model_class metadata raises ValueError."""
+        import onnx as onnx_lib
+        from onnx import helper, TensorProto
+
+        # Build a valid ONNX model but without shapley metadata
+        input_info = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])
+        output_info = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
+        node = helper.make_node("Identity", inputs=["x"], outputs=["y"])
+        graph = helper.make_graph([node], "bare_graph", [input_info], [output_info])
+        proto = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        proto.ir_version = 8
+        onnx_lib.save(proto, onnx_path)
+
+        with pytest.raises(ValueError, match="sa_model_class"):
+            load_onnx(onnx_path)
+
+    @pytest.mark.parametrize("ModelClass", ONNX_MODELS)
+    def test_save_unfitted_raises(self, ModelClass, onnx_path):
+        """Saving an unfitted model raises RuntimeError."""
+        model = ModelClass()
+        with pytest.raises(RuntimeError, match="not fitted"):
+            save_onnx(model, onnx_path)

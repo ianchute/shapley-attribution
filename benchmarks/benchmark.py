@@ -9,9 +9,11 @@ Usage
 
 Generates synthetic journeys with converting and non-converting outcomes,
 then measures how well each model recovers the true channel importances.
+Also includes an ONNX round-trip timing section for GBM-backed models.
 """
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -28,6 +30,8 @@ from shapley_attribution import (
     LinearAttribution,
     TimeDecayAttribution,
     PositionBasedAttribution,
+    save_onnx,
+    load_onnx,
 )
 from shapley_attribution.datasets import make_attribution_problem
 from shapley_attribution.metrics import attribution_summary, normalized_mean_absolute_error
@@ -172,5 +176,103 @@ def run_benchmark(
     print("\nBenchmark complete.")
 
 
+def run_onnx_benchmark(
+    n_channels=8,
+    n_journeys=5000,
+    max_journey_length=6,
+    random_state=42,
+    mc_iters=2000,
+):
+    """Benchmark ONNX save/load round-trips and onnxruntime inference."""
+    try:
+        import onnx  # noqa: F401
+        import onnxruntime as rt
+    except ImportError:
+        print("\n[ONNX benchmark skipped — install onnx, skl2onnx, onnxruntime]")
+        return
+
+    from shapley_attribution.models.path_shapley import PathShapleyAttribution
+
+    print("\n" + "=" * 70)
+    print("ONNX BENCHMARK")
+    print("=" * 70)
+
+    journeys, conversions, _, _ = make_attribution_problem(
+        n_channels=n_channels,
+        n_journeys=n_journeys,
+        max_journey_length=max_journey_length,
+        random_state=random_state,
+    )
+
+    models_to_test = {
+        "MC Shapley": MonteCarloShapleyAttribution(
+            n_iter=mc_iters, random_state=random_state
+        ),
+        "Path Shapley": PathShapleyAttribution(random_state=random_state),
+        "Linear": LinearAttribution(),
+        "Simplified Shapley": SimplifiedShapleyAttribution(),
+    }
+
+    # Fit all models first
+    fitted = {}
+    print("\nFitting models for ONNX benchmark...")
+    for name, model in models_to_test.items():
+        t0 = time.perf_counter()
+        model.fit(journeys, y=conversions)
+        fitted[name] = (model, time.perf_counter() - t0)
+        print(f"  {name} fitted in {fitted[name][1]:.3f}s")
+
+    print(f"\n{'Model':<22} {'Save(ms)':>10} {'Load(ms)':>10} {'RT OK':>7} {'ORT inf(ms)':>12}")
+    print("-" * 65)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name, (model, _) in fitted.items():
+            path = Path(tmpdir) / f"{name.replace(' ', '_')}.onnx"
+
+            # --- Save ---
+            t0 = time.perf_counter()
+            save_onnx(model, path)
+            save_ms = (time.perf_counter() - t0) * 1000
+
+            # --- Load ---
+            t0 = time.perf_counter()
+            loaded = load_onnx(path)
+            load_ms = (time.perf_counter() - t0) * 1000
+
+            # --- Verify round-trip ---
+            rt_ok = np.allclose(
+                model.get_attribution_array(),
+                loaded.get_attribution_array(),
+                atol=1e-5,
+            )
+
+            # --- ORT inference (GBM models only) ---
+            ort_inf_ms = "N/A"
+            has_gbm = getattr(model, "value_model_", None) is not None
+            if has_gbm:
+                sess = rt.InferenceSession(str(path))
+                input_name = sess.get_inputs()[0].name
+                mask = np.ones((1, n_channels), dtype=np.float32)
+                # Warm-up
+                for _ in range(10):
+                    sess.run(None, {input_name: mask})
+                # Timed
+                N = 200
+                t0 = time.perf_counter()
+                for _ in range(N):
+                    sess.run(None, {input_name: mask})
+                ort_inf_ms = f"{(time.perf_counter() - t0) / N * 1000:.3f}"
+
+            print(
+                f"{name:<22} {save_ms:>10.1f} {load_ms:>10.1f} "
+                f"{'✓' if rt_ok else '✗':>7} {str(ort_inf_ms):>12}"
+            )
+
+    print("\nNote: ORT inf = onnxruntime latency per call for the GBM value function.")
+    print("      This is the inner loop cost for PathShapley/MC at inference time.")
+    print("\nONNX benchmark complete.")
+
+
 if __name__ == "__main__":
     run_benchmark()
+    run_onnx_benchmark()

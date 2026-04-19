@@ -12,6 +12,9 @@ pip install -e ".[benchmarks]"
 
 # With dev/test dependencies
 pip install -e ".[dev]"
+
+# With ONNX export/import support
+pip install -e ".[onnx]"
 ```
 
 ## Quick Start
@@ -139,6 +142,67 @@ model.get_params()          # {'n_iter': 2000, 'random_state': None, ...}
 model.set_params(n_iter=500)
 cloned = clone(model)       # Deep copy with same params
 ```
+
+## ONNX Serialization
+
+All fitted models can be saved to and loaded from ONNX format, enabling deployment via any ONNX-compatible runtime.
+
+### Installation
+
+```bash
+pip install -e ".[onnx]"
+# or manually:
+pip install onnx skl2onnx onnxruntime
+```
+
+### Save and load
+
+```python
+from shapley_attribution import MonteCarloShapleyAttribution, save_onnx, load_onnx
+
+# Fit a model
+mc = MonteCarloShapleyAttribution(n_iter=2000, random_state=42)
+mc.fit(journeys, y=conversions)
+
+# Save — available as standalone function or instance method
+save_onnx(mc, "mc_shapley.onnx")
+mc.save_onnx("mc_shapley.onnx")   # equivalent
+
+# Load — returns a fully usable fitted model
+from shapley_attribution.base import BaseAttributionModel
+loaded = load_onnx("mc_shapley.onnx")
+loaded = BaseAttributionModel.load_onnx("mc_shapley.onnx")  # equivalent
+
+# Full API is available immediately after loading
+scores  = loaded.get_attribution()        # dict: channel → score
+array   = loaded.get_attribution_array()  # numpy array
+matrix  = loaded.transform(new_journeys)  # per-journey attribution
+```
+
+### What is serialized
+
+| Model type | ONNX graph | Metadata |
+|---|---|---|
+| `MonteCarloShapleyAttribution` | Learned GBM (GradientBoostingClassifier → ONNX via skl2onnx) | channels, attribution scores, hyperparams |
+| `PathShapleyAttribution` | Learned GBM | channels, attribution scores, position_attribution_, hyperparams |
+| `SimplifiedShapleyAttribution` | Identity op (trivial) | channels, attribution scores, hyperparams |
+| `OrderedShapleyAttribution` | Identity op (trivial) | channels, attribution scores, position_attribution_, hyperparams |
+| Heuristic baselines | Identity op (trivial) | channels, attribution scores, hyperparams |
+
+For GBM-backed models the ONNX file embeds the full value function graph, so you can query the conversion probability model directly via `onnxruntime`:
+
+```python
+import onnxruntime as rt
+import numpy as np
+
+sess = rt.InferenceSession("mc_shapley.onnx")
+# binary presence mask — shape (1, n_channels)
+mask = np.array([[1, 0, 1, 0, 0, 0, 1, 0]], dtype=np.float32)
+label, proba = sess.run(None, {"input": mask})
+p_conversion = proba[0, 1]  # P(conversion | channels 0, 2, 6 present)
+```
+
+This makes it straightforward to deploy the value function to any ONNX-compatible serving stack (ONNX Runtime Server, Triton, MLIR, etc.) without a Python sklearn dependency.
 
 ## Conversion Labels
 
@@ -355,14 +419,15 @@ With directed interactions active, MC Shapley is blind to channel ordering and p
 pytest tests/ -v
 ```
 
-130 tests covering sklearn API compliance, attribution correctness, MC convergence, PathShapley ordering sensitivity, directed data generation, input validation, and the synthetic dataset generator.
+Tests covering sklearn API compliance, attribution correctness, MC convergence, PathShapley ordering sensitivity, directed data generation, input validation, the synthetic dataset generator, and ONNX round-trip serialization for all model types.
 
 ## Project Structure
 
 ```
 shapley_attribution/
 ├── __init__.py                   # Public API
-├── base.py                       # BaseAttributionModel (sklearn mixin + plot methods)
+├── base.py                       # BaseAttributionModel (sklearn mixin + plot + ONNX methods)
+├── onnx.py                       # save_onnx() / load_onnx() — ONNX serialization
 ├── models/
 │   ├── simplified.py             # Exact set-based Shapley
 │   ├── ordered.py                # Exact position-aware Shapley
@@ -382,6 +447,7 @@ shapley_attribution/
 
 ## Roadmap
 
+- [x] ONNX export/import (`save_onnx` / `load_onnx`) with onnxruntime inference support
 - [ ] GPU acceleration (PyTorch/CuPy) for 100k+ journeys
 - [ ] Distributed computing support (Ray/Dask) for multi-machine scaling
 - [ ] Comprehensive tests on larger datasets (>100k journeys)

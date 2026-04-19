@@ -37,6 +37,7 @@ from shapley_attribution.visualization import (
     plot_journeys_heatmap,
     plot_position_attribution,
 )
+from shapley_attribution.onnx import save_onnx, load_onnx
 
 __version__ = "2.0.0"
 
@@ -68,4 +69,7 @@ __all__ = [
     "plot_position_attribution",
     # Models (continued)
     "PathShapleyAttribution",
+    # ONNX
+    "save_onnx",
+    "load_onnx",
 ]

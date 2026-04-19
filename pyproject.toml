@@ -42,6 +42,11 @@ benchmarks = [
     "pandas>=1.4",
     "tabulate>=0.9",
 ]
+onnx = [
+    "onnx>=1.14",
+    "skl2onnx>=1.15",
+    "onnxruntime>=1.16",
+]
 
 [project.urls]
 Homepage = "https://github.com/ianchute/shapley-attribution-model-zhao-naive"

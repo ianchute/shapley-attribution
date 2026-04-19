@@ -247,6 +247,69 @@ class BaseAttributionModel(BaseEstimator, TransformerMixin, ABC):
                                      max_journeys=max_journeys)
 
     # ------------------------------------------------------------------
+    # ONNX serialization
+    # ------------------------------------------------------------------
+
+    def save_onnx(self, path) -> None:
+        """Serialize this fitted model to an ONNX file.
+
+        GBM-backed models (``MonteCarloShapleyAttribution``,
+        ``PathShapleyAttribution``) embed their learned value function as an
+        ONNX graph so it can be queried directly via ``onnxruntime``.  All
+        other models store their attribution state in ONNX ``metadata_props``.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination ``.onnx`` file path.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        ImportError
+            If ``onnx`` / ``skl2onnx`` are not installed.
+            Install with: ``pip install onnx skl2onnx onnxruntime``
+
+        Examples
+        --------
+        >>> model.save_onnx("my_model.onnx")
+        >>> loaded = BaseAttributionModel.load_onnx("my_model.onnx")
+        >>> loaded.get_attribution_array()
+        """
+        from shapley_attribution.onnx import save_onnx
+        save_onnx(self, path)
+
+    @staticmethod
+    def load_onnx(path) -> "BaseAttributionModel":
+        """Load a fitted attribution model from an ONNX file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to an ``.onnx`` file created by :meth:`save_onnx`.
+
+        Returns
+        -------
+        model : BaseAttributionModel
+            Fully usable fitted model.
+
+        Raises
+        ------
+        ImportError
+            If ``onnx`` is not installed.
+        ValueError
+            If the file is not a valid shapley-attribution ONNX model.
+
+        Examples
+        --------
+        >>> loaded = BaseAttributionModel.load_onnx("my_model.onnx")
+        >>> scores = loaded.get_attribution()
+        """
+        from shapley_attribution.onnx import load_onnx
+        return load_onnx(path)
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 

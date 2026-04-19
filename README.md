@@ -1,20 +1,24 @@
 # Shapley Attribution
 
+```bash
+pip install shapley-attribution
+```
+
 A scikit-learn compatible Python library for multi-touch attribution modeling using Shapley values from game theory. Computes marginal contribution of each marketing channel to conversion, inspired by Zhao et al. (2018) but using an interventional Shapley approach with a learned conversion model.
 
 ## Installation
 
 ```bash
-pip install -e .
-
-# With benchmark dependencies
-pip install -e ".[benchmarks]"
-
-# With dev/test dependencies
-pip install -e ".[dev]"
+pip install shapley-attribution
 
 # With ONNX export/import support
-pip install -e ".[onnx]"
+pip install "shapley-attribution[onnx]"
+
+# With benchmark dependencies
+pip install "shapley-attribution[benchmarks]"
+
+# Development install from source
+pip install -e ".[dev]"
 ```
 
 ## Quick Start

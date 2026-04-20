@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shapley-attribution"
-version = "2.0.0"
+version = "2.1.0"
 description = "Shapley value methods for multi-touch attribution modeling with scikit-learn compatible API"
 readme = "README.md"
 license = {text = "MIT"}

@@ -39,7 +39,7 @@ from shapley_attribution.visualization import (
 )
 from shapley_attribution.onnx import save_onnx, load_onnx
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 __all__ = [
     # Models
